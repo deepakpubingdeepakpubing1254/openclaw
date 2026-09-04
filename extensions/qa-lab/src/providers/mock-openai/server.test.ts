@@ -3452,7 +3452,7 @@ Update and merge these partial structured summaries.`,
           ),
         ],
       });
-      expect(outputText(parent)).toBe("NO_REPLY");
+      expect(outputText(parent)).toBe("Worker started.");
     };
 
     const firstChildResponse = startChild("qa-terminal-child-1", firstChildSessionKey);
@@ -3520,6 +3520,29 @@ Update and merge these partial structured summaries.`,
       ],
     });
     expect(outputText(payload)).toContain("QA-SUBAGENT-TERMINAL-INTERNAL-MUST-NOT-LEAK");
+  });
+
+  it("returns explicit empty output for the intentional non-delivery worker", async () => {
+    const server = await startMockServer();
+    const prompt =
+      "Subagent terminal reply QA worker: empty. Return no assistant output after the write.";
+    await expectNonStreamingResponsesJson(server, {
+      tools: [{ type: "function", name: "write" }],
+      input: [makeUserInput(prompt)],
+    });
+    const writeRequest = requireRecord(
+      await (await fetch(`${server.baseUrl}/debug/last-request`)).json(),
+      "intentional empty terminal write request",
+    );
+
+    const payload = await expectNonStreamingResponsesJson(server, {
+      tools: [{ type: "function", name: "write" }],
+      input: [
+        makeUserInput(prompt),
+        makeToolOutputWithCallId(String(writeRequest.plannedToolCallId), "Wrote 40 bytes"),
+      ],
+    });
+    expect(outputText(payload)).toBe("");
   });
 
   it("represents an empty terminal reply intentionally in the resumed parent turn", async () => {
@@ -3657,7 +3680,7 @@ Update and merge these partial structured summaries.`,
   });
 
   it.each(["visible", "silent", "fallback", "restart", "empty"])(
-    "ends the %s parent turn before direct terminal delivery",
+    "acknowledges the %s worker before direct terminal delivery",
     async (terminalCase) => {
       const server = await startMockServer();
       const prompt = `Subagent terminal reply QA check: ${terminalCase}.`;
@@ -3673,9 +3696,28 @@ Update and merge these partial structured summaries.`,
       });
 
       expect(outputItems(payload).some((item) => item.type === "function_call")).toBe(false);
-      expect(outputText(payload)).toBe("NO_REPLY");
+      expect(outputText(payload)).toBe("Worker started.");
     },
   );
+
+  it("acknowledges the empty worker before its intentional non-delivery", async () => {
+    const server = await startMockServer();
+    const payload = await expectNonStreamingResponsesJson(server, {
+      tools: [SESSIONS_SPAWN_TOOL, SESSIONS_YIELD_TOOL],
+      input: [
+        makeUserInput(
+          "Subagent terminal reply QA check: empty. Reply to the requester after spawning.",
+        ),
+        makeToolOutputWithCallId(
+          "call_mock_sessions_spawn_1",
+          JSON.stringify({ status: "accepted", runId: "run-empty" }),
+        ),
+      ],
+    });
+
+    expect(outputItems(payload).some((item) => item.type === "function_call")).toBe(false);
+    expect(outputText(payload)).toBe("QA-SUBAGENT-EMPTY-PARENT-ACK");
+  });
 
   it.each([
     ["visible", "NO_REPLY"],
