@@ -10,6 +10,21 @@ import { applyPathPrepend } from "./path-prepend.js";
 // builds and can bootstrap pnpm when a managed checkout requires it.
 type BuildManager = "pnpm" | "bun" | "npm";
 
+export function resolvePnpmCandidateEnv(
+  env: NodeJS.ProcessEnv | undefined,
+  virtualStoreDir: string,
+): NodeJS.ProcessEnv {
+  // A shared project store lets candidate installation prune the serving generation.
+  // Set every spelling: inherited lower-case keys can win over upper-case overrides.
+  return {
+    ...env,
+    PNPM_CONFIG_VIRTUAL_STORE_DIR: virtualStoreDir,
+    pnpm_config_virtual_store_dir: virtualStoreDir,
+    NPM_CONFIG_VIRTUAL_STORE_DIR: virtualStoreDir,
+    npm_config_virtual_store_dir: virtualStoreDir,
+  };
+}
+
 type UpdatePackageManagerFailureReason =
   | "preferred-manager-unavailable"
   | "pnpm-corepack-enable-failed"
@@ -18,7 +33,7 @@ type UpdatePackageManagerFailureReason =
 
 type PackageManagerCommandRunner = (
   argv: string[],
-  options: { timeoutMs: number; env?: NodeJS.ProcessEnv; cwd?: string },
+  options: { timeoutMs?: number; env?: NodeJS.ProcessEnv; cwd?: string },
 ) => Promise<{ stdout: string; stderr: string; code: number | null }>;
 
 type ResolvedBuildManager =
@@ -78,12 +93,16 @@ async function enablePnpmViaCorepack(
   timeoutMs: number,
   env?: NodeJS.ProcessEnv,
   expectedVersion?: string,
+  work?: { timeoutMs?: number },
 ): Promise<"enabled" | "missing" | "failed"> {
   if (!(await isManagerAvailable(runCommand, "corepack", timeoutMs, env))) {
     return "missing";
   }
   try {
-    const res = await runCommand(["corepack", "enable"], { timeoutMs, env });
+    const res = await runCommand(["corepack", "enable"], {
+      timeoutMs: work ? work.timeoutMs : timeoutMs,
+      env,
+    });
     if (res.code !== 0) {
       return "failed";
     }
@@ -99,6 +118,7 @@ async function bootstrapPnpmViaNpm(params: {
   version: string;
   runCommand: PackageManagerCommandRunner;
   timeoutMs: number;
+  work?: { timeoutMs?: number };
   baseEnv?: NodeJS.ProcessEnv;
 }): Promise<{ env: NodeJS.ProcessEnv; cleanup: () => Promise<void> } | null> {
   const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-update-pnpm-"));
@@ -118,7 +138,7 @@ async function bootstrapPnpmViaNpm(params: {
     const installResult = await params.runCommand(
       ["npm", "install", "--prefix", tempRoot, `pnpm@${params.version}`],
       {
-        timeoutMs: params.timeoutMs,
+        timeoutMs: params.work ? params.work.timeoutMs : params.timeoutMs,
         env: params.baseEnv,
       },
     );
@@ -147,6 +167,7 @@ export async function resolveUpdateBuildManager(
   root: string,
   timeoutMs: number,
   baseEnv?: NodeJS.ProcessEnv,
+  work?: { timeoutMs?: number },
 ): Promise<ResolvedBuildManager> {
   // Version selection belongs to the target checkout, including preflight and rollback.
   const runCommand: PackageManagerCommandRunner = (argv, options) =>
@@ -159,7 +180,13 @@ export async function resolveUpdateBuildManager(
       return { kind: "resolved", manager: "pnpm", preferred, fallback: false };
     }
 
-    const corepackStatus = await enablePnpmViaCorepack(runCommand, timeoutMs, baseEnv, pnpmVersion);
+    const corepackStatus = await enablePnpmViaCorepack(
+      runCommand,
+      timeoutMs,
+      baseEnv,
+      pnpmVersion,
+      work,
+    );
     if (corepackStatus === "enabled") {
       return { kind: "resolved", manager: "pnpm", preferred, fallback: false };
     }
@@ -170,6 +197,7 @@ export async function resolveUpdateBuildManager(
         version: pnpmVersion,
         runCommand,
         timeoutMs,
+        work,
         baseEnv,
       });
       if (pnpmBootstrap) {
