@@ -7,6 +7,8 @@ import ai.openclaw.app.chat.OUTBOX_BRANCH_CHANGED_ERROR
 import ai.openclaw.app.chat.chatOutboxDisplayError
 import ai.openclaw.app.chat.normalizeVisibleChatMessageRole
 import ai.openclaw.app.gateway.GatewayLoadedImage
+import ai.openclaw.app.gateway.GatewayLoadedMedia
+import ai.openclaw.app.gateway.GatewayMediaKind
 import ai.openclaw.app.i18n.nativeString
 import ai.openclaw.app.i18n.nativeStringResource
 import ai.openclaw.app.ui.design.ClawTheme
@@ -14,6 +16,7 @@ import ai.openclaw.app.ui.image.RemoteImageResult
 import ai.openclaw.app.ui.image.safeRemoteImageStore
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -26,7 +29,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -36,8 +38,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ExpandLess
 import androidx.compose.material.icons.filled.ExpandMore
-import androidx.compose.material.icons.filled.OpenInFull
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -61,6 +63,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -69,7 +72,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -241,7 +243,31 @@ private fun ChatLinkPreview(
         modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp).then(metadataAnchor?.modifier ?: Modifier),
         verticalArrangement = Arrangement.spacedBy(3.dp),
       ) {
-        Text(domain, style = ClawTheme.type.captionSmall, color = ClawTheme.colors.textMuted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Row(
+          modifier = Modifier.fillMaxWidth(),
+          horizontalArrangement = Arrangement.spacedBy(6.dp),
+          verticalAlignment = Alignment.CenterVertically,
+        ) {
+          Text(
+            text = domain,
+            style = ClawTheme.type.captionSmall,
+            color = ClawTheme.colors.textMuted,
+            modifier = Modifier.weight(1f),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+          )
+          Surface(
+            onClick = { expanded = false },
+            shape = CircleShape,
+            color = Color.Transparent,
+          ) {
+            Icon(
+              imageVector = Icons.Default.ExpandLess,
+              contentDescription = nativeString("Collapse link preview"),
+              tint = ClawTheme.colors.textMuted,
+            )
+          }
+        }
         when (val preview = result) {
           null -> {
             Text(nativeString("Loading preview…"), style = ClawTheme.type.caption, color = ClawTheme.colors.textMuted)
@@ -439,6 +465,7 @@ internal fun ChatMessageAttachmentGroup(
   imagePage: Int,
   resolverReady: Boolean,
   loadImage: suspend (String) -> GatewayLoadedImage?,
+  loadMedia: suspend (String, GatewayMediaKind, Boolean) -> GatewayLoadedMedia?,
 ) {
   val compact = parts.count { it.type == "image" } > 1
   var imageIndex = firstImageIndex
@@ -465,6 +492,10 @@ internal fun ChatMessageAttachmentGroup(
                   loadImage = loadImage,
                   compact = compact,
                 )
+              }
+
+              part.type == "file" -> {
+                ChatFileAttachment(content = part, resolverReady = resolverReady, loadMedia = loadMedia)
               }
 
               else -> {
@@ -506,8 +537,9 @@ internal fun ChatManagedImage(
   var image by remember(artifactId) { mutableStateOf<ImageBitmap?>(null) }
   var failed by remember(artifactId) { mutableStateOf(false) }
   var retryGeneration by rememberSaveable(artifactId) { mutableStateOf(0) }
+  val decodeDispatcher = LocalChatImageDecodeDispatcher.current
 
-  LaunchedEffect(artifactId, resolverReady, retryGeneration) {
+  LaunchedEffect(artifactId, resolverReady, retryGeneration, decodeDispatcher) {
     if (!resolverReady) {
       failed = true
       image = null
@@ -518,7 +550,7 @@ internal fun ChatManagedImage(
     val loaded = runCatching { loadImage(artifactId) }.getOrNull()
     image =
       loaded?.let { value ->
-        withContext(Dispatchers.Default) { decodeImageBytes(value.bytes)?.asImageBitmap() }
+        withContext(decodeDispatcher) { decodeImageBytes(value.bytes)?.asImageBitmap() }
       }
     failed = image == null
   }
@@ -536,24 +568,19 @@ internal fun ChatManagedImage(
         color = ClawTheme.colors.surfaceRaised,
         modifier = Modifier.fillMaxWidth(),
       ) {
-        Text(
-          nativeString("Image unavailable · Tap to retry"),
-          modifier = Modifier.padding(12.dp),
-          style = ClawTheme.type.caption,
-          color = ClawTheme.colors.textMuted,
-        )
+        ChatImageStatus(nativeString("Image unavailable · Tap to retry"))
       }
     }
 
     else -> {
-      Text(
-        nativeString("Loading image…"),
-        modifier = Modifier.padding(12.dp),
-        style = ClawTheme.type.caption,
-        color = ClawTheme.colors.textMuted,
-      )
+      ChatImageStatus(nativeString("Loading image…"))
     }
   }
+}
+
+@Composable
+private fun ChatImageStatus(text: String) {
+  Text(text, modifier = Modifier.padding(12.dp), style = ClawTheme.type.caption, color = ClawTheme.colors.textMuted)
 }
 
 @Composable
@@ -566,7 +593,6 @@ private fun ChatImagePreview(
   val anchor = rememberChatReaderAnchor(stateKey)
   var previewVisible by rememberSaveable(stateKey) { mutableStateOf(false) }
   Surface(
-    onClick = { previewVisible = true },
     shape = RoundedCornerShape(10.dp),
     border = BorderStroke(1.dp, ClawTheme.colors.border),
     color = ClawTheme.colors.surfaceRaised,
@@ -582,7 +608,7 @@ private fun ChatImagePreview(
           val height = (image.height * scale).roundToInt().coerceIn(constraints.minHeight, constraints.maxHeight)
           val placeable = measurable.measure(constraints.copy(minWidth = width, maxWidth = width, minHeight = height, maxHeight = height))
           layout(width, height) { placeable.placeRelative(0, 0) }
-        },
+        }.clickable(role = Role.Button, onClickLabel = nativeString("Open image preview")) { previewVisible = true },
   ) {
     Box {
       Image(
@@ -591,20 +617,6 @@ private fun ChatImagePreview(
         contentScale = ContentScale.Fit,
         modifier = Modifier.matchParentSize().then(anchor?.modifier ?: Modifier),
       )
-      Surface(
-        modifier = Modifier.align(Alignment.BottomEnd).padding(8.dp).size(32.dp),
-        shape = CircleShape,
-        color = Color.Black.copy(alpha = 0.62f),
-        contentColor = Color.White,
-      ) {
-        Box(contentAlignment = Alignment.Center) {
-          Icon(
-            imageVector = Icons.Default.OpenInFull,
-            contentDescription = nativeString("Open image preview"),
-            modifier = Modifier.size(17.dp),
-          )
-        }
-      }
     }
   }
   if (previewVisible) {
